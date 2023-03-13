@@ -19,12 +19,12 @@ import asyncio
 import sys
 from logging import DEBUG, INFO, StreamHandler, ERROR, basicConfig, getLogger, WARNING
 from os import environ
+from pathlib import Path
 from urllib.parse import quote
 
 from discord import Intents
 from discord.ext.bridge import Bot
 from dislog import DiscordWebhookHandler
-from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from . import *
@@ -33,7 +33,7 @@ logger = getLogger(__name__)
 
 # https://github.com/aio-libs/aiopg/issues/678
 if sys.version_info >= (3, 8) and sys.platform.lower().startswith("win"):
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore  # not present on POSIX
 
 
 async def async_main() -> None:
@@ -107,6 +107,14 @@ async def async_main() -> None:
 
     logger.debug("Tables created successfully.")
 
+    # Scratch folder
+    folder_path_str = environ.get("BIGBROTHER_SCRATCH_FOLDER", "./scratch")
+    folder_path = Path(folder_path_str).absolute().resolve()
+
+    folder_path.mkdir(exist_ok=True, parents=True)
+
+    fm = FileManager(folder_path)
+
     # We need to enable the members intent to get the members in a voice channel
     intents = Intents.default()
     intents.members = True  # type: ignore  # noqa  # marked with a special decorator
@@ -127,7 +135,7 @@ async def async_main() -> None:
         debug_guilds=debug_guilds,
         description="bigbrother listens to your discord voice chats and lets you recall the audio data",
     )
-    bot.add_cog(BigBrother(bot, sa_engine))
+    bot.add_cog(BigBrother(bot, sa_engine, fm))
 
     # Bot startup
     logger.info("Starting bot...")
@@ -141,6 +149,7 @@ async def async_main() -> None:
         if not bot.is_closed():
             await bot.close()
         await sa_engine.dispose()
+        fm.close()
 
 
 def main() -> None:

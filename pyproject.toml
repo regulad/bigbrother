@@ -1,21 +1,24 @@
 [tool.poetry]
 name = "bigbrother"
-version = "0.1.1"
+version = "0.1.2"
 description = "Big brother listens to your discord voice chats and lets you recall the audio data."
 authors = ["Parker Wahle <regulad@regulad.xyz>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.11,<3.13"  # py-cord uses the depreciated modules
 # Extras
 # Cannot be in a sperate category, doesn't work properly w/ poetry
 pytest = {version = "^7.2.1", optional = true}
 mypy = {version = "^1.1.1", optional = true}
+types-aiofiles = {version = "^23.1.0.0", optional = true}
 # Dependencies
 dislog = "^3.0.0"
 py-cord = {extras = ["speed", "voice"], version = "^2.4.0"}
 asyncpg = "^0.27.0"
 sqlalchemy = {extras = ["asyncio"], version = "^2.0.5.post1"}
+ffmpeg-python = "^0.2.0"
+aiofiles = "^23.1.0"
 
 [tool.poetry.group.dev]
 optional = true
@@ -26,7 +29,7 @@ pre-commit = "^3.0.4"
 
 [tool.poetry.extras]
 test = ["pytest"]
-type = ["mypy"]
+type = ["mypy", "types-aiofiles"]
 
 [build-system]
 requires = ["poetry-core"]

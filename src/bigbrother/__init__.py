@@ -15,10 +15,11 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 from __future__ import annotations
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 from .cog import *
+from .file_management import *
+from .peppercord_audio import *
+from .sink import *
 from .sql import *
 from .utils import *
-from .client import *
-from .sink import *

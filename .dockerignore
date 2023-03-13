@@ -28,12 +28,5 @@ codemeta.json
 CITATION.cff
 Vagrantfile
 
-# Configuration files for the program
-config/
-
 # Scratch Data
 scratch/
-
-# Media I/O
-input/
-output/

@@ -15,12 +15,14 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # from __future__ import annotations  # discord.py needs em
 import zlib
+from asyncio import Future
 from datetime import timedelta, datetime
 from functools import partial
-from io import BytesIO
 from logging import getLogger
-from typing import cast, Sequence
+from subprocess import Popen
+from typing import cast, Sequence, Any
 
+import ffmpeg
 from discord import Bot, VoiceChannel, VoiceClient, VoiceState, Member, command, File
 from discord.ext.bridge import BridgeApplicationContext
 from discord.ext.commands import Cog
@@ -28,9 +30,10 @@ from discord.sinks import RecordingException
 from sqlalchemy import select, insert, Insert, Select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
-from .client import SafelyClosedVoiceClient
-from .sql import VoiceChannels, LeaveReason, Sessions
+from .file_management import FileManager, ScratchFile
+from .peppercord_audio import CustomVoiceClient
 from .sink import BigBrotherSink
+from .sql import VoiceChannels, LeaveReason, Sessions
 from .utils import shorthand_to_timedelta
 
 logger = getLogger(__name__)
@@ -64,9 +67,10 @@ class BigBrother(Cog):
     BigBrother worker cog.
     """
 
-    def __init__(self, bot: Bot, sa_engine: AsyncEngine) -> None:
+    def __init__(self, bot: Bot, sa_engine: AsyncEngine, fm: FileManager) -> None:
         self.bot = bot
         self._sa_engine = sa_engine
+        self._file_manager = fm
 
     async def connect_and_listen(self, voice_channel: VoiceChannel, *, bypass: bool = False) -> VoiceClient | None:
         """
@@ -97,7 +101,7 @@ class BigBrother(Cog):
                     # The voice channel is not allowed to be listened to.
                     return None
 
-        client: VoiceClient = await voice_channel.connect(cls=SafelyClosedVoiceClient)
+        client: VoiceClient = await voice_channel.connect(cls=CustomVoiceClient)
 
         sink = BigBrotherSink(self._sa_engine, self.bot.loop)
 
@@ -302,33 +306,57 @@ class BigBrother(Cog):
                 select(Sessions.data)
                 .where(Sessions.user_id == who.id)  # type: ignore
                 .where(Sessions.started_at >= starting_at)
+                .where(Sessions.data != None)  # noqa
             )
             result = await conn.execute(sel_stmt)
             compressed_chunks: Sequence[bytes] = result.scalars().all()
 
-        uncompressed_chunks: list[bytes | None] = [None for _ in range(len(compressed_chunks))]
-
-        for i, compressed_chunk in enumerate(compressed_chunks):
-            uncompressed_chunks[i] = await ctx.bot.loop.run_in_executor(None, zlib.decompress, compressed_chunk)
-
-        del compressed_chunks  # save some memory
-
-        # TODO: concatenate the chunks and send them to the user
-
-        if not uncompressed_chunks:
+        if not compressed_chunks:
             await ctx.respond("They didn't say anything!")
             return
 
-        last_chunk: bytes = uncompressed_chunks[-1]  # type: ignore
+        uncompressed_chunks: list[bytes] = []
+        decompression_multithread_futures: list[Future[bytes]] = []
 
-        del uncompressed_chunks  # save some memory
+        for compressed_chunk in compressed_chunks:
+            future = ctx.bot.loop.run_in_executor(None, zlib.decompress, compressed_chunk)
+            decompression_multithread_futures.append(future)
+        for future in decompression_multithread_futures:
+            uncompressed_chunks.append(await future)
 
-        last_chunk_io = BytesIO(last_chunk)
-        last_chunk_io.seek(0)
+        del compressed_chunks  # save some memory
 
-        discord_file = File(last_chunk_io, filename=f"{who.id}.ogg")
+        async with self._file_manager.get_file(file_extension=".ogg") as output_file:
+            ffmpeg_streams_concat: list[tuple[ScratchFile, Any]] = []  # "Any" is the ffmpeg stream
 
-        await ctx.respond("Here's what they said:", file=discord_file)
+            for uncompressed_chunk in uncompressed_chunks:
+                scratch = self._file_manager.get_file(file_extension=".ogg", initial_bytes=uncompressed_chunk)
+                scratch.open("w")  # write the initial bytes
+                stream = ffmpeg.input(str(scratch.path))
+                ffmpeg_streams_concat.append((scratch, stream))
+
+            del uncompressed_chunks  # trigger early gc maybe
+
+            try:
+                ffmpeg_process: Popen = (
+                    ffmpeg.concat(*tuple(ffmpeg_stream for _, ffmpeg_stream in ffmpeg_streams_concat), v=0, a=1)
+                    .output(str(output_file.path))
+                    .run_async()
+                )
+                with ffmpeg_process:  # in case of anything happening with the executor
+                    await ctx.bot.loop.run_in_executor(None, partial(ffmpeg_process.wait))
+            finally:
+                for scratch_file, _ in ffmpeg_streams_concat:
+                    scratch_file.close()
+
+            del ffmpeg_streams_concat  # early gc? pretty please?
+
+            with output_file.open("r") as fp:
+                fp.seek(0)
+
+                discord_file = File(fp, filename=f"{who.id}.ogg")  # type: ignore  # also works with raw IO base
+
+                await ctx.respond("Here's what they said:", file=discord_file)
 
 
 __all__ = ("BigBrother",)

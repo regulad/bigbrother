@@ -17,22 +17,20 @@ from __future__ import annotations
 
 import zlib
 from asyncio import AbstractEventLoop, run_coroutine_threadsafe, Event
+from concurrent.futures import ThreadPoolExecutor, wait, Future
 from datetime import datetime
+from functools import partial
 from io import BytesIO
 from types import SimpleNamespace
 from typing import cast
 
-from discord import VoiceClient
-from discord.types.snowflake import Snowflake
+from discord import VoiceClient, MISSING
 from discord.sinks import OGGSink, Filters, AudioData
+from discord.types.snowflake import Snowflake
 from sqlalchemy import insert, update, select, Insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncConnection
 
 from .sql import Sessions, LeaveReason, Users
-
-
-DEFAULT_MAX_LENGTH: int | None = int(0.480 * 1.049e6)  # 0.480 MiB (480 KiB) in bytes
-# equal to 30 seconds of 128kbps audio (discord max bitrate)
 
 
 class BigBrotherSink(OGGSink):
@@ -43,7 +41,7 @@ class BigBrotherSink(OGGSink):
         self,
         sa_engine: AsyncEngine,
         loop: AbstractEventLoop,
-        max_file_len: int | None = DEFAULT_MAX_LENGTH,
+        max_file_len: int | None | MISSING = MISSING,
         *,
         filters=None,  # type: ignore  # unknown
     ) -> None:
@@ -52,11 +50,17 @@ class BigBrotherSink(OGGSink):
         self._sa_engine = sa_engine
         self._loop = loop
         self._max_file_len = max_file_len
-        self._sessions: dict[Snowflake, int] = {}  # {member: session_id}
 
         self.cleanup_event = Event()  # signature is wrong in 3.11.2, no loop kwarg
 
         self._can_listen_user_cache: dict[Snowflake, bool] = {}
+        self._sessions: dict[Snowflake, int] = {}  # {member: session_id}
+
+    def init(self, vc: VoiceClient) -> None:  # type: ignore  # called under listen; types are WRONG
+        super().init(vc)
+        if self._max_file_len is MISSING:
+            bitrate_kbps = getattr(vc.channel, "bitrate", 64000)  # default 64kb
+            self._max_file_len = bitrate_kbps * 30  # 30 seconds of audio in bytes
 
     @Filters.container
     def write(self, data: bytes, user: Snowflake) -> None:
@@ -66,6 +70,8 @@ class BigBrotherSink(OGGSink):
         :param user: The user ID who sent the data.
         :return: None
         """
+        assert self._max_file_len is not MISSING, "Max file length is missing!"
+
         voice_client = self.vc
         if voice_client is None:
             return  # Something didn't initialize correctly.
@@ -138,8 +144,11 @@ class BigBrotherSink(OGGSink):
         :return: None, always.
         """
         self.finished = True
-        for user in set(self.audio_data.keys()):
-            self.cleanup_one(user, reason=reason)
+        with ThreadPoolExecutor(thread_name_prefix="CleanupExecutor") as executor:
+            cleanup_futures: list[Future] = []
+            for user in set(self.audio_data.keys()):
+                cleanup_futures.append(executor.submit(partial(self.cleanup_one, user, reason=reason)))
+            wait(cleanup_futures)
         self.cleanup_event.set()
 
     def cleanup_one(self, user: Snowflake, *, reason: LeaveReason = LeaveReason.NATURAL) -> int | None:
@@ -172,6 +181,8 @@ class BigBrotherSink(OGGSink):
 
         fp = audio_data.file
 
+        del audio_data  # Keep the memory usage down, still.
+
         # Send it!
         # Unfortunately, SQLAlchemy doesn't support file-like objects, so we need to read the data into memory.
         # We also compress the data to save space on the database.
@@ -179,11 +190,11 @@ class BigBrotherSink(OGGSink):
         # fp.seek(0)  # done by format_audio
         uncompressed = fp.read()
 
+        del fp  # Keep the memory usage down, still.
+
         data = zlib.compress(uncompressed)
 
         del uncompressed  # Keep the memory usage down.
-        del fp  # Keep the memory usage down, still.
-        del audio_data  # Keep the memory usage down, still.
 
         async def commit_session() -> None:
             async with self._sa_engine.begin() as conn:  # type: AsyncConnection
@@ -200,6 +211,8 @@ class BigBrotherSink(OGGSink):
                 await conn.commit()
 
         run_coroutine_threadsafe(commit_session(), self._loop).result()
+
+        del data  # Don't wait for the garbage collector! This may invoke it on CPython.
 
         return session_id
 
