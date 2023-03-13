@@ -9,7 +9,7 @@ x-common:
 services:
   db:
     image: "postgres:15-alpine"
-    hostname: postgres
+    hostname: db
     restart: always
     ports:
       - "5432:5432/tcp"
