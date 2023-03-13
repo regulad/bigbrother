@@ -1,0 +1,46 @@
+version: "3.8"
+x-common:
+  database:
+    &db-environment
+#    Change these! These are sensitive secrets.
+    POSTGRES_USER: &db-user "bigbrother"
+    POSTGRES_PASSWORD: &db-password "bigbrother"  # Only change the password
+    POSTGRES_DB: &db-database "bigbrother"
+services:
+  db:
+    image: "postgres:15-alpine"
+    hostname: postgres
+    restart: always
+    ports:
+      - "5432:5432/tcp"
+    environment:
+      <<: *db-environment
+      PGDATA: "/var/lib/postgresql/data/pgdata"
+    volumes:
+      - "db:/var/lib/postgresql/data/pgdata"
+  adminer:
+    image: "adminer:4-standalone"
+    restart: always
+    ports:
+      - "8080:8080/tcp"
+    depends_on:
+      - db
+  bot:
+    image: "ghcr.io/regulad/bigbrother:latest"
+    build: .
+    restart: unless-stopped
+    environment:
+      # Postgres connection
+      BIGBROTHER_POSTGRES_HOST: "db"
+      BIGBROTHER_POSTGRES_PORT: "5432"
+      BIGBROTHER_POSTGRES_USER: *db-user
+      BIGBROTHER_POSTGRES_DATABASE: *db-database
+      BIGBROTHER_POSTGRES_PASSWORD: *db-password
+      # BigBrother configuration
+      BIGBROTHER_DISCORD_WEBHOOK: "https://discord.com/api/webhooks/12345/abcde"
+      BIGBROTHER_DISCORD_WEBHOOK_MESSAGE: "<@12345>"
+      BIGBROTHER_BOT_TOKEN: "12345.12345.12345"
+    depends_on:
+      - db
+volumes:
+  db:
