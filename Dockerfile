@@ -32,7 +32,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 LABEL maintainer="Parker Wahle <regulad@regulad.xyz>" \
       name="bigbrother" \
-      version="0.1.0"
+      version="0.1.1"
 
 # Add dependencies
 RUN apt update && apt upgrade -y && apt install -y ffmpeg gcc curl python3-dev g++
